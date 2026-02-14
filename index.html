@@ -407,6 +407,7 @@
       connected: false,
       mq5Loaded: false,
       eaRunning: false,
+      apiSessionToken: "",
       settings: {},
       parameters: [],
       trades: [],
@@ -479,23 +480,54 @@
       return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
     }
 
+    async function fetchApiSessionToken(force = false) {
+      if (state.apiSessionToken && !force) return state.apiSessionToken;
+      const base = apiBase();
+      if (!base) throw new Error("Backend API URL is empty");
+      const res = await fetch(`${base}/api/session`, { method: "GET" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false || !data.token) {
+        throw new Error(data.error || `Session init failed (${res.status})`);
+      }
+      state.apiSessionToken = String(data.token);
+      return state.apiSessionToken;
+    }
+
     async function api(path, options = {}) {
       const base = apiBase();
       if (!base) throw new Error("Backend API URL is empty");
       const url = `${base}${path}`;
-      const fetchOpts = { method: options.method || "GET", headers: options.headers || {} };
-      if (options.formData) {
-        fetchOpts.body = options.formData;
-      } else if (options.body !== undefined) {
-        fetchOpts.headers["Content-Type"] = "application/json";
-        fetchOpts.body = JSON.stringify(options.body);
+      let triedRefresh = false;
+
+      while (true) {
+        const headers = { ...(options.headers || {}) };
+        if (path !== "/api/session") {
+          const token = await fetchApiSessionToken(triedRefresh);
+          headers["X-KutEA-Session"] = token;
+        }
+
+        const fetchOpts = { method: options.method || "GET", headers };
+        if (options.formData) {
+          fetchOpts.body = options.formData;
+        } else if (options.body !== undefined) {
+          fetchOpts.headers["Content-Type"] = "application/json";
+          fetchOpts.body = JSON.stringify(options.body);
+        }
+
+        const res = await fetch(url, fetchOpts);
+        const data = await res.json().catch(() => ({}));
+
+        if (res.status === 401 && !triedRefresh && path !== "/api/session") {
+          state.apiSessionToken = "";
+          triedRefresh = true;
+          continue;
+        }
+
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.error || `Request failed (${res.status})`);
+        }
+        return data;
       }
-      const res = await fetch(url, fetchOpts);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) {
-        throw new Error(data.error || `Request failed (${res.status})`);
-      }
-      return data;
     }
 
     async function handleLogin(evt) {
@@ -511,6 +543,12 @@
       sessionStorage.setItem("kutea26_session", JSON.stringify(session));
       setAuthenticated(true);
       log("Authentication successful");
+      try {
+        await fetchApiSessionToken(true);
+        log("Backend session initialized");
+      } catch (err) {
+        log(`Backend session init error: ${err.message}`);
+      }
       startPolling();
     }
 
@@ -539,6 +577,7 @@
     function logout() {
       sessionStorage.removeItem("kutea26_session");
       stopPolling();
+      state.apiSessionToken = "";
       setAuthenticated(false);
     }
 
