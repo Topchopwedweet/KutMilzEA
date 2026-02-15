@@ -143,6 +143,9 @@
     .btn-start { background: #0f8f60; border-color: #0f8f60; }
     .btn-stop { background: #a33a45; border-color: #a33a45; }
     .btn-restart { background: #2853b3; border-color: #2853b3; }
+    .btn-backend-connect { background: #1c6bb7; border-color: #1c6bb7; margin-top: 8px; }
+    .btn-backend-disconnect { background: #8a2f3f; border-color: #8a2f3f; margin-top: 8px; }
+    .backend-state { margin-top: 8px; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -267,6 +270,8 @@
             <div class="col-4">
               <label class="hint">Backend API URL</label>
               <input id="apiBase" type="text" value="http://127.0.0.1:8787" />
+              <button id="backendApiBtn" class="btn-backend-connect" type="button">Connect Backend</button>
+              <div id="backendApiStatus" class="hint backend-state">Backend: Disconnected</div>
             </div>
             <div class="col-4">
               <label class="hint">Select Broker</label>
@@ -407,6 +412,7 @@
       connected: false,
       mq5Loaded: false,
       eaRunning: false,
+      backendApiOnline: false,
       apiSessionToken: "",
       settings: {},
       parameters: [],
@@ -431,6 +437,8 @@
       password: document.getElementById("password"),
       authError: document.getElementById("authError"),
       apiBase: document.getElementById("apiBase"),
+      backendApiBtn: document.getElementById("backendApiBtn"),
+      backendApiStatus: document.getElementById("backendApiStatus"),
       brokerSelect: document.getElementById("brokerSelect"),
       brokerLogin: document.getElementById("brokerLogin"),
       brokerPassword: document.getElementById("brokerPassword"),
@@ -543,13 +551,10 @@
       sessionStorage.setItem("kutea26_session", JSON.stringify(session));
       setAuthenticated(true);
       log("Authentication successful");
-      try {
-        await fetchApiSessionToken(true);
-        log("Backend session initialized");
-      } catch (err) {
-        log(`Backend session init error: ${err.message}`);
+      const ok = await connectBackendApi(false);
+      if (!ok) {
+        log("Backend not connected. Set Backend API URL and click Connect Backend.");
       }
-      startPolling();
     }
 
     function setAuthenticated(ok) {
@@ -568,7 +573,9 @@
           return setAuthenticated(false);
         }
         setAuthenticated(true);
-        startPolling();
+        connectBackendApi(false).then(ok => {
+          if (!ok) log("Backend not connected. Set Backend API URL and click Connect Backend.");
+        });
       } catch {
         setAuthenticated(false);
       }
@@ -576,9 +583,46 @@
 
     function logout() {
       sessionStorage.removeItem("kutea26_session");
+      disconnectBackendApi(false);
+      setAuthenticated(false);
+    }
+
+    function setBackendApiState(online, text = "") {
+      state.backendApiOnline = !!online;
+      el.backendApiStatus.textContent = `Backend: ${text || (online ? "Connected" : "Disconnected")}`;
+      el.backendApiBtn.textContent = online ? "Disconnect Backend" : "Connect Backend";
+      el.backendApiBtn.classList.toggle("btn-backend-connect", !online);
+      el.backendApiBtn.classList.toggle("btn-backend-disconnect", online);
+    }
+
+    function disconnectBackendApi(logMessage = true) {
       stopPolling();
       state.apiSessionToken = "";
-      setAuthenticated(false);
+      setBackendApiState(false, "Disconnected");
+      if (logMessage) log("Backend API disconnected");
+    }
+
+    async function connectBackendApi(manual = false) {
+      try {
+        await fetchApiSessionToken(true);
+        await api("/api/health");
+        setBackendApiState(true, "Connected");
+        startPolling();
+        if (manual) log("Backend API connected");
+        return true;
+      } catch (err) {
+        disconnectBackendApi(false);
+        if (manual || !isFileMode()) log(`Backend connect error: ${err.message}`);
+        return false;
+      }
+    }
+
+    async function toggleBackendApi() {
+      if (state.backendApiOnline) {
+        disconnectBackendApi(true);
+        return;
+      }
+      await connectBackendApi(true);
     }
 
     function showPanel(panelId, updateHash = true) {
@@ -989,6 +1033,7 @@
           api("/api/trades/history"),
           api("/api/logs")
         ]);
+        setBackendApiState(true, "Connected");
         setBrokerStatus(broker.connected, broker.connected ? "Connected" : "Disconnected");
         state.connected = !!broker.connected;
         state.mq5Loaded = !!ea.ea_loaded;
@@ -1000,6 +1045,7 @@
         updateMarketSeries(state.trades);
         (logs.logs || []).forEach(item => log(item.msg || "", true));
       } catch (err) {
+        setBackendApiState(false, "Disconnected");
         setBrokerStatus(false, "Disconnected");
         if (!isFileMode()) log(`Backend poll error: ${err.message}`);
       }
@@ -1019,6 +1065,7 @@
     function wire() {
       el.loginForm.addEventListener("submit", handleLogin);
       el.logoutBtn.addEventListener("click", logout);
+      el.backendApiBtn.addEventListener("click", toggleBackendApi);
       el.connectBtn.addEventListener("click", connectBroker);
       el.mq5File.addEventListener("change", handleFileUpload);
       el.startBtn.addEventListener("click", startEngine);
@@ -1040,6 +1087,12 @@
         else if (v === "MetaTrader5") el.compatibilityLabel.textContent = "Direct MT5 Execution Mode";
         else el.compatibilityLabel.textContent = "Broker accepted by MetaTrader5";
       });
+      el.apiBase.addEventListener("change", () => {
+        state.apiSessionToken = "";
+        setBackendApiState(false, "Disconnected");
+        stopPolling();
+        if (state.authenticated) log("Backend API URL changed. Click Connect Backend to retry.");
+      });
       initPanels();
       if (isFileMode()) {
         log("Tip: open this page via local server and run backend on http://127.0.0.1:8787");
@@ -1047,6 +1100,7 @@
     }
 
     wire();
+    setBackendApiState(false, "Disconnected");
     loadSession();
     renderLive([]);
     renderHistory([]);
